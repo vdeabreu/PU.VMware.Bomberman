@@ -36,13 +36,19 @@ MOVES: dict[str, Coord] = {
 
 
 def decide_actions(game_state: dict[str, Any], me: str) -> list[dict[str, Any]]:
-    world = game_state["world"]
+    # Be defensive: smoke-test payloads and edge ticks may have missing fields.
+    # We bail to a no-op rather than crashing.
+    if not isinstance(game_state, dict):
+        return []
+    world = game_state.get("world")
+    if not isinstance(world, dict) or "width" not in world or "height" not in world:
+        return []
     w, h = world["width"], world["height"]
     tick = game_state.get("tick", 0)
 
-    entities = game_state.get("entities", [])
-    unit_state = game_state.get("unit_state", {})
-    agents = game_state.get("agents", {})
+    entities = game_state.get("entities", []) or []
+    unit_state = game_state.get("unit_state", {}) or {}
+    agents = game_state.get("agents", {}) or {}
 
     my_unit_ids: list[str] = list(agents.get(me, {}).get("unit_ids", []))
     enemy_agent = "b" if me == "a" else "a"
