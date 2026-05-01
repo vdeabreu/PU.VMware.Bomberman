@@ -7,6 +7,13 @@ list of per-unit actions, which the adapter forwards back to the engine.
 
 If the bot doesn't answer within BOT_TIMEOUT_MS, the adapter silently no-ops
 for that tick (all units "stay" implicitly).
+
+Protocol (see https://www.gocoder.one/docs/api-reference and the upstream
+python3 starter kit). Server sends:
+- {"type": "info", ...}                                    -> ignored
+- {"type": "game_state", "payload": <full game_state>}     -> initial snapshot
+- {"type": "tick", "payload": {"tick": N, "events": [...]}}-> per-tick events
+- {"type": "endgame_state", "payload": {...}}              -> game over
 """
 
 from __future__ import annotations
@@ -37,36 +44,67 @@ def env(name: str, default: Optional[str] = None, required: bool = False) -> str
 
 
 class GameStateMirror:
-    """Maintains a full game_state by applying engine events.
+    """Maintains a full game_state by applying engine packets.
 
-    The first packet we receive from the engine is the full initial state.
-    Subsequent packets are events; we apply them here so the team bot always
-    sees a fresh, complete snapshot.
+    Recognizes both the wrapped Bomberland protocol (`{"type": "game_state",
+    "payload": {...}}`, `{"type": "tick", "payload": {"tick": N, "events":
+    [...]}}`) and bare event packets (defensive — older engine builds).
     """
 
     def __init__(self) -> None:
         self.state: Optional[dict[str, Any]] = None
+        self.endgame: Optional[dict[str, Any]] = None
 
     def apply(self, packet: dict[str, Any]) -> None:
-        if self.state is None:
-            if self._looks_like_full_state(packet):
-                self.state = packet
+        if not isinstance(packet, dict):
             return
 
         ptype = packet.get("type")
+
+        if ptype == "info":
+            return
+
+        if ptype == "endgame_state":
+            self.endgame = packet.get("payload") or {}
+            return
+
+        if ptype == "game_state":
+            payload = packet.get("payload")
+            if isinstance(payload, dict) and self._looks_like_full_state(payload):
+                self.state = payload
+            return
+
         if ptype == "tick":
-            self.state["tick"] = packet.get("tick", self.state.get("tick", 0))
-        elif ptype == "unit_state":
-            data = packet.get("data", {})
+            payload = packet.get("payload") or {}
+            tick = payload.get("tick")
+            if self.state is not None and tick is not None:
+                self.state["tick"] = tick
+            for event in payload.get("events", []) or []:
+                self._apply_event(event)
+            return
+
+        # Fallbacks for engines that send things unwrapped (defensive).
+        if self.state is None and self._looks_like_full_state(packet):
+            self.state = packet
+            return
+        self._apply_event(packet)
+
+    def _apply_event(self, event: dict[str, Any]) -> None:
+        if self.state is None or not isinstance(event, dict):
+            return
+
+        ev_type = event.get("type")
+        if ev_type == "unit_state":
+            data = event.get("data") or {}
             uid = data.get("unit_id")
-            if uid and uid in self.state.get("unit_state", {}):
-                self.state["unit_state"][uid].update(data)
-        elif ptype == "entity_spawned":
-            entity = packet.get("data", {})
-            if entity:
-                self.state.setdefault("entities", []).append(entity)
-        elif ptype == "entity_expired":
-            coords = packet.get("data")
+            if uid:
+                self.state.setdefault("unit_state", {})[uid] = data
+        elif ev_type == "entity_spawned":
+            data = event.get("data") or {}
+            if data:
+                self.state.setdefault("entities", []).append(data)
+        elif ev_type == "entity_expired":
+            coords = event.get("data")
             if isinstance(coords, list) and len(coords) == 2:
                 x, y = coords
                 self.state["entities"] = [
@@ -74,20 +112,24 @@ class GameStateMirror:
                     for e in self.state.get("entities", [])
                     if not (e.get("x") == x and e.get("y") == y)
                 ]
-        elif ptype == "entity_state":
-            coords = packet.get("coordinates")
-            updated = packet.get("updated_entity")
+        elif ev_type == "entity_state":
+            coords = event.get("coordinates")
+            updated = event.get("updated_entity")
             if isinstance(coords, list) and len(coords) == 2 and updated:
                 x, y = coords
-                entities = self.state.get("entities", [])
+                entities = self.state.setdefault("entities", [])
+                replaced = False
                 for i, e in enumerate(entities):
                     if e.get("x") == x and e.get("y") == y:
                         entities[i] = updated
+                        replaced = True
                         break
-        elif ptype == "unit":
-            # A unit action echo. State will be reflected by follow-up
-            # unit_state / entity_spawned events. Nothing to do here.
+                if not replaced:
+                    entities.append(updated)
+        elif ev_type == "unit":
+            # Action echo. Coordinate updates arrive as a follow-up unit_state event.
             pass
+        # Unknown event types are ignored silently to stay forward-compatible.
 
     def _looks_like_full_state(self, packet: dict[str, Any]) -> bool:
         return all(k in packet for k in ("agents", "unit_state", "entities", "world"))
@@ -124,8 +166,10 @@ class Adapter:
         async with websockets.connect(
             self.connection_string, max_size=None, ping_interval=20, ping_timeout=20
         ) as ws:
-            self.log.info("connected as agent %s; bot=%s timeout=%.2fs",
-                          self.my_agent_id, self.bot_endpoint, self.bot_timeout_s)
+            self.log.info(
+                "connected as agent %s; bot=%s timeout=%.2fs",
+                self.my_agent_id, self.bot_endpoint, self.bot_timeout_s,
+            )
             async with aiohttp.ClientSession() as http:
                 await asyncio.gather(
                     self._receive_loop(ws),
@@ -133,18 +177,34 @@ class Adapter:
                 )
 
     async def _receive_loop(self, ws) -> None:
+        seen_first = False
         async for raw in ws:
             try:
                 packet = json.loads(raw)
             except json.JSONDecodeError:
                 self.log.warning("dropping non-JSON packet: %r", raw[:80])
                 continue
+
+            if not seen_first:
+                seen_first = True
+                self.log.debug("first packet: %s", json.dumps(packet)[:200])
+
             self.mirror.apply(packet)
 
-    async def _action_loop(self, ws, http) -> None:  # http: aiohttp.ClientSession
-        # Wait until we have a full state.
-        while self.mirror.state is None:
+            if self.mirror.endgame is not None:
+                self.log.info("endgame_state received: %s", self.mirror.endgame)
+
+    async def _action_loop(self, ws, http) -> None:
+        # Wait until we have a full state with the keys our payload contract guarantees.
+        waited = 0.0
+        while self.mirror.state is None or "world" not in self.mirror.state:
             await asyncio.sleep(0.05)
+            waited += 0.05
+            if waited > 30 and waited % 5 < 0.05:
+                self.log.warning(
+                    "still waiting for initial game_state after %.0fs; check protocol/engine",
+                    waited,
+                )
 
         tick_rate = float(self.mirror.state.get("config", {}).get("tick_rate_hz", 3))
         period = 1.0 / max(tick_rate, 0.1)
@@ -152,8 +212,11 @@ class Adapter:
 
         while True:
             await asyncio.sleep(period)
+            if self.mirror.endgame is not None:
+                self.log.info("endgame reached, action loop exiting")
+                return
             snap = self.mirror.snapshot()
-            if snap is None:
+            if snap is None or "world" not in snap:
                 continue
             tick = snap.get("tick", 0)
             if tick == self.last_tick_actioned:
@@ -163,9 +226,7 @@ class Adapter:
             for action in actions:
                 await self._send_action(ws, action)
 
-    async def _request_bot_actions(
-        self, http, snap: dict[str, Any]  # http: aiohttp.ClientSession
-    ) -> list[dict[str, Any]]:
+    async def _request_bot_actions(self, http, snap):
         import aiohttp
 
         payload = {
@@ -191,11 +252,7 @@ class Adapter:
             return []
         return self._normalize_actions(body, snap)
 
-    def _normalize_actions(
-        self, body: Any, snap: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Accept either {"actions": [...]} or a bare list, and translate our
-        simplified wire format into Bomberland action packets."""
+    def _normalize_actions(self, body, snap):
         if isinstance(body, dict) and "actions" in body:
             raw = body["actions"]
         elif isinstance(body, list):
@@ -205,7 +262,7 @@ class Adapter:
             return []
 
         my_units = set(snap["agents"].get(self.my_agent_id, {}).get("unit_ids", []))
-        out: list[dict[str, Any]] = []
+        out = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
@@ -226,20 +283,14 @@ class Adapter:
                     and len(coords) == 2
                     and all(isinstance(c, int) for c in coords)
                 ):
-                    out.append(
-                        {
-                            "type": "detonate",
-                            "coordinates": coords,
-                            "unit_id": unit_id,
-                        }
-                    )
+                    out.append({"type": "detonate", "coordinates": coords, "unit_id": unit_id})
                 else:
                     self.log.warning("detonate without valid coordinates for %s", unit_id)
             else:
                 self.log.warning("ignoring unknown action %r for %s", action, unit_id)
         return out
 
-    async def _send_action(self, ws, action: dict[str, Any]) -> None:
+    async def _send_action(self, ws, action):
         try:
             await ws.send(json.dumps(action))
         except Exception as exc:  # noqa: BLE001

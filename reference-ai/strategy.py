@@ -7,8 +7,8 @@ Per unit, each tick, we pick one of:
 3. Else, move one step toward the nearest enemy unit (BFS) through passable tiles.
 4. Else, stay put.
 
-The danger map marks every tile that will be fire within DANGER_HORIZON ticks, so
-we avoid stepping into blast paths even before they detonate.
+Coordinate system note: the Bomberland engine uses **mathematical** y axis,
+i.e. "up" increases y. We honour that here.
 """
 
 from __future__ import annotations
@@ -18,18 +18,20 @@ from typing import Any, Optional
 
 Coord = tuple[int, int]
 
-DANGER_HORIZON = 6  # ticks we look ahead for future fire
-DEFAULT_BOMB_DURATION = 30  # matches engine default
+DANGER_HORIZON = 6
+DEFAULT_BOMB_DURATION = 30
 DEFAULT_BLAST_DIAMETER = 3
 
-BLOCKING_ENTITY_TYPES = {"m", "o", "w"}  # metal, ore, wood — can't walk through
+BLOCKING_ENTITY_TYPES = {"m", "o", "w"}
 BOMB_TYPE = "b"
 BLAST_TYPE = "x"
+
+# Bomberland convention: up = y+1, down = y-1, right = x+1, left = x-1.
 MOVES: dict[str, Coord] = {
-    "up": (0, -1),
-    "down": (0, 1),
-    "left": (-1, 0),
-    "right": (1, 0),
+    "up":    (0,  1),
+    "down":  (0, -1),
+    "left":  (-1, 0),
+    "right": (1,  0),
 }
 
 
@@ -46,8 +48,8 @@ def decide_actions(game_state: dict[str, Any], me: str) -> list[dict[str, Any]]:
     enemy_agent = "b" if me == "a" else "a"
     enemy_unit_ids: list[str] = list(agents.get(enemy_agent, {}).get("unit_ids", []))
 
-    blocked = _static_blocked_map(entities, w, h)
-    danger = _danger_map(entities, unit_state, w, h, tick)
+    blocked = _static_blocked_map(entities)
+    danger = _danger_map(entities, w, h, tick)
 
     enemy_positions: list[Coord] = [
         _pos(unit_state[uid])
@@ -56,7 +58,7 @@ def decide_actions(game_state: dict[str, Any], me: str) -> list[dict[str, Any]]:
     ]
 
     actions: list[dict[str, Any]] = []
-    occupied: set[Coord] = set()  # avoid sending 2 units to the same tile
+    occupied: set[Coord] = set()
     for uid in my_unit_ids:
         u = unit_state.get(uid)
         if not u or u.get("hp", 0) <= 0:
@@ -67,21 +69,9 @@ def decide_actions(game_state: dict[str, Any], me: str) -> list[dict[str, Any]]:
     return actions
 
 
-def _decide_one(
-    uid: str,
-    unit: dict[str, Any],
-    blocked: set[Coord],
-    danger: dict[Coord, int],  # tile -> earliest tick of fire
-    enemies: list[Coord],
-    entities: list[dict[str, Any]],
-    w: int,
-    h: int,
-    occupied: set[Coord],
-    tick: int,
-) -> dict[str, Any]:
+def _decide_one(uid, unit, blocked, danger, enemies, entities, w, h, occupied, tick):
     pos = _pos(unit)
 
-    # 1. In danger? Flee.
     if pos in danger:
         safe = _bfs_nearest_safe(pos, blocked, danger, w, h, occupied)
         if safe is not None:
@@ -89,23 +79,20 @@ def _decide_one(
             if step is not None:
                 occupied.add(_apply_step(pos, step))
                 return {"unit_id": uid, "action": step}
-        # No escape found, at least try any adjacent non-blocked tile.
         fallback = _any_adjacent(pos, blocked, w, h, occupied)
         if fallback is not None:
             occupied.add(_apply_step(pos, fallback))
             return {"unit_id": uid, "action": fallback}
         return {"unit_id": uid, "action": "stay"}
 
-    # 2. Should we bomb? Only if adjacent to a destructible and we can still escape.
     if (
         unit.get("inventory", {}).get("bombs", 0) > 0
-        and _adjacent_to_destructible(pos, entities, w, h)
-        and _has_escape_after_bomb(pos, blocked, entities, unit, w, h, tick)
+        and _adjacent_to_destructible(pos, entities)
+        and _has_escape_after_bomb(pos, blocked, entities, unit, w, h)
         and not _bomb_already_at(pos, entities)
     ):
         return {"unit_id": uid, "action": "bomb"}
 
-    # 3. Seek the nearest enemy.
     if enemies:
         path = _bfs_path_to_any(pos, set(enemies), blocked, danger, w, h, occupied)
         if path:
@@ -114,21 +101,20 @@ def _decide_one(
                 occupied.add(_apply_step(pos, step))
                 return {"unit_id": uid, "action": step}
 
-    # 4. Fallback: idle.
     return {"unit_id": uid, "action": "stay"}
 
 
-def _pos(unit: dict[str, Any]) -> Coord:
+def _pos(unit):
     c = unit["coordinates"]
     return (int(c[0]), int(c[1]))
 
 
-def _in_bounds(p: Coord, w: int, h: int) -> bool:
+def _in_bounds(p, w, h):
     return 0 <= p[0] < w and 0 <= p[1] < h
 
 
-def _static_blocked_map(entities: list[dict[str, Any]], w: int, h: int) -> set[Coord]:
-    blocked: set[Coord] = set()
+def _static_blocked_map(entities):
+    blocked = set()
     for e in entities:
         t = e.get("type")
         if t in BLOCKING_ENTITY_TYPES or t == BOMB_TYPE:
@@ -136,22 +122,14 @@ def _static_blocked_map(entities: list[dict[str, Any]], w: int, h: int) -> set[C
     return blocked
 
 
-def _danger_map(
-    entities: list[dict[str, Any]],
-    unit_state: dict[str, Any],
-    w: int,
-    h: int,
-    tick: int,
-) -> dict[Coord, int]:
+def _danger_map(entities, w, h, tick):
     """Tile -> earliest tick at which that tile will be fire."""
     danger: dict[Coord, int] = {}
 
-    # Active blast tiles right now.
     for e in entities:
         if e.get("type") == BLAST_TYPE:
             danger[(int(e["x"]), int(e["y"]))] = tick
 
-    # Bombs that will explode soon.
     for e in entities:
         if e.get("type") != BOMB_TYPE:
             continue
@@ -161,13 +139,13 @@ def _danger_map(
         bx, by = int(e["x"]), int(e["y"])
         diameter = int(e.get("blast_diameter", DEFAULT_BLAST_DIAMETER))
         radius = max(0, (diameter - 1) // 2)
+        # +/- on each axis, blocked by solid blocks.
         for (dx, dy) in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
             for r in range(radius + 1):
                 tile = (bx + dx * r, by + dy * r)
                 if not _in_bounds(tile, w, h):
                     break
                 if _tile_blocks_blast(tile, entities):
-                    # Blast stops at solid blocks (but still hits the block itself).
                     danger[tile] = min(danger.get(tile, expires), expires)
                     break
                 danger[tile] = min(danger.get(tile, expires), expires)
@@ -176,21 +154,14 @@ def _danger_map(
     return danger
 
 
-def _tile_blocks_blast(p: Coord, entities: list[dict[str, Any]]) -> bool:
+def _tile_blocks_blast(p, entities):
     for e in entities:
         if (int(e["x"]), int(e["y"])) == p and e.get("type") in BLOCKING_ENTITY_TYPES:
             return True
     return False
 
 
-def _bfs_nearest_safe(
-    start: Coord,
-    blocked: set[Coord],
-    danger: dict[Coord, int],
-    w: int,
-    h: int,
-    occupied: set[Coord],
-) -> Optional[list[Coord]]:
+def _bfs_nearest_safe(start, blocked, danger, w, h, occupied):
     q: deque[tuple[Coord, list[Coord]]] = deque()
     q.append((start, [start]))
     seen = {start}
@@ -198,7 +169,7 @@ def _bfs_nearest_safe(
         p, path = q.popleft()
         if p != start and p not in danger and p not in occupied:
             return path
-        for (dx, dy) in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        for (dx, dy) in MOVES.values():
             np = (p[0] + dx, p[1] + dy)
             if np in seen or not _in_bounds(np, w, h) or np in blocked:
                 continue
@@ -207,15 +178,7 @@ def _bfs_nearest_safe(
     return None
 
 
-def _bfs_path_to_any(
-    start: Coord,
-    targets: set[Coord],
-    blocked: set[Coord],
-    danger: dict[Coord, int],
-    w: int,
-    h: int,
-    occupied: set[Coord],
-) -> Optional[list[Coord]]:
+def _bfs_path_to_any(start, targets, blocked, danger, w, h, occupied):
     q: deque[tuple[Coord, list[Coord]]] = deque()
     q.append((start, [start]))
     seen = {start}
@@ -223,12 +186,10 @@ def _bfs_path_to_any(
         p, path = q.popleft()
         if p in targets:
             return path
-        for (dx, dy) in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        for (dx, dy) in MOVES.values():
             np = (p[0] + dx, p[1] + dy)
             if np in seen or not _in_bounds(np, w, h):
                 continue
-            # Enemies may sit on blocked tiles (they're units, not blocks), so
-            # we allow stepping onto a target even if it's "blocked".
             if np not in targets and (np in blocked or np in danger or np in occupied):
                 continue
             seen.add(np)
@@ -236,7 +197,7 @@ def _bfs_path_to_any(
     return None
 
 
-def _first_step(path: list[Coord]) -> Optional[str]:
+def _first_step(path):
     if len(path) < 2:
         return None
     dx = path[1][0] - path[0][0]
@@ -247,14 +208,12 @@ def _first_step(path: list[Coord]) -> Optional[str]:
     return None
 
 
-def _apply_step(pos: Coord, action: str) -> Coord:
+def _apply_step(pos, action):
     dx, dy = MOVES.get(action, (0, 0))
     return (pos[0] + dx, pos[1] + dy)
 
 
-def _any_adjacent(
-    pos: Coord, blocked: set[Coord], w: int, h: int, occupied: set[Coord]
-) -> Optional[str]:
+def _any_adjacent(pos, blocked, w, h, occupied):
     for name, (dx, dy) in MOVES.items():
         np = (pos[0] + dx, pos[1] + dy)
         if _in_bounds(np, w, h) and np not in blocked and np not in occupied:
@@ -262,9 +221,7 @@ def _any_adjacent(
     return None
 
 
-def _adjacent_to_destructible(
-    pos: Coord, entities: list[dict[str, Any]], w: int, h: int
-) -> bool:
+def _adjacent_to_destructible(pos, entities):
     for (dx, dy) in MOVES.values():
         np = (pos[0] + dx, pos[1] + dy)
         for e in entities:
@@ -273,20 +230,9 @@ def _adjacent_to_destructible(
     return False
 
 
-def _has_escape_after_bomb(
-    pos: Coord,
-    blocked: set[Coord],
-    entities: list[dict[str, Any]],
-    unit: dict[str, Any],
-    w: int,
-    h: int,
-    tick: int,
-) -> bool:
-    """Simulate the bomb we're about to drop and verify we can reach a safe tile
-    within BOMB_DURATION_TICKS ticks, where "safe" = not in our own future blast."""
+def _has_escape_after_bomb(pos, blocked, entities, unit, w, h):
     diameter = int(unit.get("blast_diameter", DEFAULT_BLAST_DIAMETER))
     radius = max(0, (diameter - 1) // 2)
-    # Build the hypothetical future blast footprint (our own bomb only, cheap approx).
     fake_blast: set[Coord] = set()
     for (dx, dy) in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
         for r in range(radius + 1):
@@ -299,8 +245,6 @@ def _has_escape_after_bomb(
             if (dx, dy) == (0, 0):
                 break
 
-    # BFS up to BOMB_DURATION_TICKS steps looking for a tile outside fake_blast
-    # and not blocked. The bomb we're dropping itself occupies our tile.
     blocked_with_self_bomb = blocked | {pos}
     q: deque[tuple[Coord, int]] = deque()
     q.append((pos, 0))
@@ -325,7 +269,7 @@ def _has_escape_after_bomb(
     return False
 
 
-def _bomb_already_at(pos: Coord, entities: list[dict[str, Any]]) -> bool:
+def _bomb_already_at(pos, entities):
     for e in entities:
         if (int(e["x"]), int(e["y"])) == pos and e.get("type") == BOMB_TYPE:
             return True

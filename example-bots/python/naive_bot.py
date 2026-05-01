@@ -24,10 +24,11 @@ import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MOVES = {
-    "up":    (0, -1),
-    "down":  (0, 1),
+    # Bomberland convention: up = y+1, down = y-1, right = x+1, left = x-1.
+    "up":    (0,  1),
+    "down":  (0, -1),
     "left":  (-1, 0),
-    "right": (1, 0),
+    "right": (1,  0),
 }
 BLOCKING_TYPES = {"m", "o", "w", "b"}  # walls, blocks, bombs — can't walk through
 FIRE_TYPE = "x"
