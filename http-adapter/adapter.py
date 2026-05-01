@@ -127,9 +127,40 @@ class GameStateMirror:
                 if not replaced:
                     entities.append(updated)
         elif ev_type == "unit":
-            # Action echo. Coordinate updates arrive as a follow-up unit_state event.
-            pass
+            # Action echo. The Bomberland engine does NOT emit a follow-up
+            # unit_state event for moves (only for HP / stun / invuln changes),
+            # so we apply the move ourselves to keep coordinates fresh — same
+            # convention as the upstream python3 starter kit's reducer.
+            self._apply_unit_action(event.get("data") or {})
         # Unknown event types are ignored silently to stay forward-compatible.
+
+    _MOVE_DELTAS = {
+        "up":    (0,  1),
+        "down":  (0, -1),
+        "right": (1,  0),
+        "left":  (-1, 0),
+    }
+
+    def _apply_unit_action(self, action: dict[str, Any]) -> None:
+        if self.state is None or not isinstance(action, dict):
+            return
+        unit_id = action.get("unit_id")
+        if not unit_id:
+            return
+        unit_state = self.state.setdefault("unit_state", {})
+        unit = unit_state.get(unit_id)
+        if not isinstance(unit, dict):
+            return
+        atype = action.get("type")
+        if atype != "move":
+            return
+        delta = self._MOVE_DELTAS.get(action.get("move"))
+        if delta is None:
+            return
+        coords = unit.get("coordinates")
+        if not (isinstance(coords, list) and len(coords) == 2):
+            return
+        unit["coordinates"] = [coords[0] + delta[0], coords[1] + delta[1]]
 
     def _looks_like_full_state(self, packet: dict[str, Any]) -> bool:
         return all(k in packet for k in ("agents", "unit_state", "entities", "world"))
