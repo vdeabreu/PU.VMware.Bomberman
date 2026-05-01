@@ -210,9 +210,11 @@ class Adapter:
         period = 1.0 / max(tick_rate, 0.1)
         self.log.info("action loop started at %.2f Hz (period=%.3fs)", tick_rate, period)
 
+        last_heartbeat_tick = -999
         while True:
             await asyncio.sleep(period)
             if self.mirror.endgame is not None:
+                self._emit_heartbeat()  # final stats line for the match-runner
                 self.log.info("endgame reached, action loop exiting")
                 return
             snap = self.mirror.snapshot()
@@ -222,9 +224,39 @@ class Adapter:
             if tick == self.last_tick_actioned:
                 continue
             self.last_tick_actioned = tick
+            # Periodic heartbeat with own-agent alive count + total HP.
+            # The match-runner uses this to break ties when the engine never
+            # emits endgame_state (e.g. Bomberland HP-underflow quirk).
+            if tick - last_heartbeat_tick >= 30:
+                self._emit_heartbeat(snap)
+                last_heartbeat_tick = tick
             actions = await self._request_bot_actions(http, snap)
             for action in actions:
                 await self._send_action(ws, action)
+
+    def _emit_heartbeat(self, snap: Optional[dict[str, Any]] = None) -> None:
+        if snap is None:
+            snap = self.mirror.snapshot()
+        if snap is None:
+            return
+        tick = snap.get("tick", 0)
+        my_unit_ids = snap.get("agents", {}).get(self.my_agent_id, {}).get("unit_ids", [])
+        unit_state = snap.get("unit_state", {})
+        alive = 0
+        total_hp = 0
+        for uid in my_unit_ids:
+            u = unit_state.get(uid)
+            if not u:
+                continue
+            hp = int(u.get("hp", 0))
+            # Bomberland 2477 lets HP go negative; treat <=0 as dead.
+            if hp > 0:
+                alive += 1
+                total_hp += hp
+        self.log.info(
+            "heartbeat tick=%d agent=%s alive=%d hp=%d",
+            tick, self.my_agent_id, alive, total_hp,
+        )
 
     async def _request_bot_actions(self, http, snap):
         import aiohttp
@@ -317,7 +349,7 @@ async def main() -> int:
         except (OSError, websockets.exceptions.WebSocketException) as exc:
             attempts += 1
             wait = min(2 ** min(attempts, 5), 30)
-            logging.getLogger("adapter").warning(
+            adapter.log.warning(
                 "connection error (%s); retrying in %ds", exc, wait
             )
             await asyncio.sleep(wait)

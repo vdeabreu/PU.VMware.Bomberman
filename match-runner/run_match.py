@@ -119,6 +119,13 @@ def main() -> int:
         winner = _find_winner_in_adapter_logs(adapter_a_logs, adapter_b_logs)
         last_tick = _last_tick_from_engine_log(engine_logs)
 
+        # Fallback: if the engine never emitted endgame_state (HP-underflow
+        # quirk in some Bomberland builds), pick a winner from the last
+        # heartbeat each adapter logged. Most living units wins, then total HP,
+        # else "draw".
+        if winner is None:
+            winner = _winner_from_heartbeats(adapter_a_logs, adapter_b_logs)
+
         if engine_exited_cleanly:
             status = "ok"
 
@@ -208,6 +215,41 @@ def _last_tick_from_engine_log(log: str) -> int | None:
                 last = v
         except ValueError:
             pass
+    return last
+
+
+# Adapter heartbeat line format:
+#   INFO [adapter-a] heartbeat tick=120 agent=a alive=2 hp=4
+_HEARTBEAT_RE = re.compile(
+    r"heartbeat\s+tick=(?P<tick>\d+)\s+agent=(?P<agent>[ab])\s+alive=(?P<alive>-?\d+)\s+hp=(?P<hp>-?\d+)",
+    re.IGNORECASE,
+)
+
+
+def _winner_from_heartbeats(adapter_a_logs: str, adapter_b_logs: str) -> str | None:
+    a = _last_heartbeat(adapter_a_logs, "a")
+    b = _last_heartbeat(adapter_b_logs, "b")
+    if a is None and b is None:
+        return None
+    a_alive, a_hp = (a or (0, 0))
+    b_alive, b_hp = (b or (0, 0))
+    if a_alive != b_alive:
+        return "a" if a_alive > b_alive else "b"
+    if a_hp != b_hp:
+        return "a" if a_hp > b_hp else "b"
+    return "draw"
+
+
+def _last_heartbeat(log: str, expected_agent: str) -> tuple[int, int] | None:
+    last: tuple[int, int] | None = None
+    last_tick = -1
+    for m in _HEARTBEAT_RE.finditer(log):
+        if m.group("agent").lower() != expected_agent:
+            continue
+        tick = int(m.group("tick"))
+        if tick >= last_tick:
+            last_tick = tick
+            last = (int(m.group("alive")), int(m.group("hp")))
     return last
 
 
