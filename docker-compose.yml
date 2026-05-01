@@ -1,16 +1,11 @@
-version: "3.8"
-
 # Dev stack for the Bomberman offsite.
-# Brings up the Bomberland engine (fetched as a submodule under engine/bomberland),
+# Brings up the Bomberland engine (pulled as a published image, no local build),
 # two HTTP adapters (one per agent slot), and the reference AI as agent B.
-# Start it with: `docker compose up --build`. Viewer is served at http://localhost:3000/.
+# Start with: `docker compose up --build`. Viewer is at http://localhost:3000/.
 
 services:
   game-engine:
-    build:
-      context: ./engine/bomberland
-      dockerfile: ./engine/bomberland-engine/Dockerfile
-    image: bomberman-offsite/engine:local
+    image: gocoderone/bomberland-engine:2477
     ports:
       - "3000:3000"
     environment:

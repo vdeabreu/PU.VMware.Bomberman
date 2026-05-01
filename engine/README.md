@@ -1,16 +1,20 @@
 # Engine integration
 
-We do **not** fork the Bomberland C++ source into this repo. Instead, we consume it via git submodule and run its pre-built images through our `docker-compose.yml`.
+We use [CoderOne's published Bomberland engine image](https://hub.docker.com/r/gocoderone/bomberland-engine) directly. **No local build is required**, and you don't need to clone the engine source for the stack to run — `docker compose up` just pulls the prebuilt image.
 
-## Fetching the engine
+The pinned tag is `gocoderone/bomberland-engine:2477` (in [`docker-compose.yml`](../docker-compose.yml)). Bump it if you want a newer engine version.
 
-```bash
-./pull-engine.sh
-```
+## When you might still want the engine source
 
-This adds `CoderOneHQ/bomberland` as a submodule under `engine/bomberland/` and pins it to a known-good commit.
+Run `./pull-engine.sh` only if you want to:
 
-## What we tweak
+- Inspect the engine source (e.g. to read the action validation schema)
+- Tweak the engine and rebuild a custom image locally
+- Pull pre-built starter kits / agent examples for reference
+
+It will git-clone (or git-submodule-add, if your workspace is a git repo) the upstream `CoderOneHQ/bomberland` repo into `engine/bomberland/`. **Nothing in `docker-compose.yml` references that directory** — it's purely for offline reading and customization.
+
+## Engine settings we override
 
 Our `docker-compose.yml` overrides a handful of env vars vs. the upstream defaults, tuned for an HTTP-mediated offsite where per-tick latency can reach ~300 ms:
 
@@ -26,8 +30,9 @@ Our `docker-compose.yml` overrides a handful of env vars vs. the upstream defaul
 
 All other settings keep upstream defaults (15x15 map, 3 units per agent, 3 HP, etc.).
 
-## Upstream docs
+## Upstream references
 
 - API reference: https://www.gocoder.one/docs/api-reference
 - Environment flags: same page, "Environment Flags" section
 - Engine repo: https://github.com/CoderOneHQ/bomberland
+- Image tags: https://hub.docker.com/r/gocoderone/bomberland-engine/tags
