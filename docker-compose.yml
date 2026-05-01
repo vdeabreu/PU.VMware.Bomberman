@@ -29,6 +29,8 @@ services:
     build:
       context: ./http-adapter
     image: bomberman-offsite/adapter:local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - game-engine
     environment:
@@ -43,6 +45,8 @@ services:
     build:
       context: ./http-adapter
     image: bomberman-offsite/adapter:local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - game-engine
     environment:

@@ -1,0 +1,3 @@
+[submodule "engine/bomberland"]
+	path = engine/bomberland
+	url = https://github.com/CoderOneHQ/bomberland.git
