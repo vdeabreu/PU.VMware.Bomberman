@@ -45,6 +45,13 @@ def decide_actions(game_state: dict, me: str) -> list[dict]:
 
     blocked = {(int(e["x"]), int(e["y"])) for e in entities if e.get("type") in BLOCKING_TYPES}
     fire_now = {(int(e["x"]), int(e["y"])) for e in entities if e.get("type") == FIRE_TYPE}
+    # Live units block tiles too; otherwise the engine rejects every move
+    # that targets an occupied cell ("cell is not vacant").
+    blocked |= {
+        (int(u["coordinates"][0]), int(u["coordinates"][1]))
+        for u in unit_state.values()
+        if u.get("hp", 0) > 0
+    }
 
     actions: list[dict] = []
     for uid in my_unit_ids:

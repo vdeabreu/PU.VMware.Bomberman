@@ -57,11 +57,19 @@ def decide_actions(game_state: dict[str, Any], me: str) -> list[dict[str, Any]]:
     blocked = _static_blocked_map(entities)
     danger = _danger_map(entities, w, h, tick)
 
+    # Live units are also obstacles. Without this, every move action that
+    # targets a tile with another unit gets rejected by the engine
+    # ("cell is not vacant").
     enemy_positions: list[Coord] = [
         _pos(unit_state[uid])
         for uid in enemy_unit_ids
         if uid in unit_state and unit_state[uid].get("hp", 0) > 0
     ]
+    blocked |= {
+        _pos(u)
+        for u in unit_state.values()
+        if u.get("hp", 0) > 0
+    }
 
     actions: list[dict[str, Any]] = []
     occupied: set[Coord] = set()
