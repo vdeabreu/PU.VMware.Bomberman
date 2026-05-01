@@ -1,0 +1,69 @@
+version: "3.8"
+
+# Dev stack for the Bomberman offsite.
+# Brings up the Bomberland engine (fetched as a submodule under engine/bomberland),
+# two HTTP adapters (one per agent slot), and the reference AI as agent B.
+# Start it with: `docker compose up --build`. Viewer is served at http://localhost:3000/.
+
+services:
+  game-engine:
+    build:
+      context: ./engine/bomberland
+      dockerfile: ./engine/bomberland-engine/Dockerfile
+    image: bomberman-offsite/engine:local
+    ports:
+      - "3000:3000"
+    environment:
+      # See engine/README.md for the rationale of these values.
+      - TICK_RATE_HZ=3
+      - GAME_DURATION_TICKS=300
+      - FIRE_SPAWN_INTERVAL_TICKS=3
+      - INITIAL_HP=3
+      - ADMIN_ROLE_ENABLED=0
+      - TELEMETRY_ENABLED=1
+      - SHUTDOWN_ON_GAME_END_ENABLED=1
+      - SAVE_REPLAY_ENABLED=1
+      - UI_ENABLED=1
+      - AGENT_ID_MAPPING=agentA,agentB
+      - PRNG_SEED=${PRNG_SEED:-1234}
+      - WORLD_SEED=${WORLD_SEED:-1234}
+    networks:
+      - offsite
+
+  adapter-a:
+    build:
+      context: ./http-adapter
+    image: bomberman-offsite/adapter:local
+    depends_on:
+      - game-engine
+    environment:
+      - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentA&name=team-a-adapter
+      - BOT_ENDPOINT=${TEAM_A_ENDPOINT:-http://reference-ai:8080/action}
+      - BOT_TIMEOUT_MS=300
+      - MY_AGENT_ID=a
+    networks:
+      - offsite
+
+  adapter-b:
+    build:
+      context: ./http-adapter
+    image: bomberman-offsite/adapter:local
+    depends_on:
+      - game-engine
+    environment:
+      - GAME_CONNECTION_STRING=ws://game-engine:3000/?role=agent&agentId=agentB&name=team-b-adapter
+      - BOT_ENDPOINT=${TEAM_B_ENDPOINT:-http://reference-ai:8080/action}
+      - BOT_TIMEOUT_MS=300
+      - MY_AGENT_ID=b
+    networks:
+      - offsite
+
+  reference-ai:
+    build:
+      context: ./reference-ai
+    image: bomberman-offsite/reference-ai:local
+    networks:
+      - offsite
+
+networks:
+  offsite:

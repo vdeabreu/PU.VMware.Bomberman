@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1920, initial-scale=1" />
+    <title>Bomberman Offsite — Big Screen</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="stage">
+      <header class="hud">
+        <div class="team team-a">
+          <div class="team-label">Team A</div>
+          <div class="team-name" id="team-a-name">—</div>
+        </div>
+        <div class="center">
+          <div class="match-title" id="match-title">Bomberman Offsite</div>
+          <div class="match-sub" id="match-sub">Waiting for match…</div>
+        </div>
+        <div class="team team-b">
+          <div class="team-label">Team B</div>
+          <div class="team-name" id="team-b-name">—</div>
+        </div>
+      </header>
+
+      <main class="viewer-wrap">
+        <iframe
+          id="viewer"
+          src="about:blank"
+          title="Bomberland viewer"
+          allowtransparency="true"
+        ></iframe>
+        <div class="viewer-placeholder" id="placeholder">
+          Viewer not connected.<br />
+          <small>Set the <code>?engine=</code> query param or edit <code>dashboard.js</code>.</small>
+        </div>
+      </main>
+
+      <footer class="standings">
+        <div class="standings-title">Standings</div>
+        <ol class="standings-list" id="standings-list">
+          <li class="standings-empty">No results yet</li>
+        </ol>
+      </footer>
+    </div>
+    <script src="dashboard.js"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.log
+node_modules/
+.DS_Store
+
+# Replay files produced by the engine
+replays/
+
+# Match runner outputs
+match-runner/out/

@@ -1,0 +1,15 @@
+{
+  "current_match": {
+    "a": "Team Red",
+    "b": "Team Blue",
+    "round": "Finals - match 1"
+  },
+  "standings": [
+    { "name": "Team Red", "wins": 4, "losses": 1 },
+    { "name": "Team Blue", "wins": 4, "losses": 1 },
+    { "name": "Team Green", "wins": 3, "losses": 2 },
+    { "name": "Team Yellow", "wins": 2, "losses": 3 },
+    { "name": "Team Black", "wins": 1, "losses": 4 },
+    { "name": "Team White", "wins": 1, "losses": 4 }
+  ]
+}
