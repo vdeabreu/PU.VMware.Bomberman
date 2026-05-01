@@ -3,9 +3,17 @@
 Pool / bracket logic is expected to be done by the caller. This CLI owns one
 match end-to-end: it brings up an isolated engine + two adapters, waits for
 the game to end (the engine self-terminates thanks to SHUTDOWN_ON_GAME_END_ENABLED),
-parses the replay, and emits a single JSON object on stdout describing the outcome.
+parses the adapter / engine logs, and emits a single JSON object on stdout
+describing the outcome.
 
 Stdlib-only. Needs docker compose available on PATH.
+
+Winner detection:
+- Primary: the adapters log `endgame_state received: {'winning_agent_id': 'a'|'b'}`
+  when the engine sends them the final WS packet. We grep that line.
+- Fallback: heuristic regex on the engine log (Bomberland 2477 logs
+  `Game completed shutting down in 5000ms` but no explicit winner line, so
+  this fallback is mostly historical).
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +71,8 @@ def main() -> int:
     winner = None
     last_tick = None
     engine_logs_path = out_dir / "engine.log"
+    adapter_a_logs_path = out_dir / "adapter-a.log"
+    adapter_b_logs_path = out_dir / "adapter-b.log"
 
     try:
         subprocess.run(
@@ -72,6 +83,7 @@ def main() -> int:
         )
 
         deadline = start + args.timeout
+        engine_exited_cleanly = False
         while time.time() < deadline:
             rc = subprocess.run(
                 ["docker", "compose", "ps", "-q", "game-engine"],
@@ -82,6 +94,7 @@ def main() -> int:
             )
             container_id = rc.stdout.strip()
             if not container_id:
+                engine_exited_cleanly = True
                 break
             inspect = subprocess.run(
                 ["docker", "inspect", "-f", "{{.State.Running}}", container_id],
@@ -89,21 +102,26 @@ def main() -> int:
                 text=True,
             )
             if inspect.stdout.strip() == "false":
+                engine_exited_cleanly = True
                 break
             time.sleep(1.0)
         else:
             status = "timeout"
 
-        logs = subprocess.run(
-            ["docker", "compose", "logs", "--no-color", "game-engine"],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        engine_logs_path.write_text(logs.stdout)
-        winner, last_tick = _parse_winner(logs.stdout)
-        status = "ok" if winner is not None or status != "timeout" else status
+        # Always capture all logs even on timeout.
+        engine_logs = _compose_logs(env, "game-engine")
+        adapter_a_logs = _compose_logs(env, "adapter-a")
+        adapter_b_logs = _compose_logs(env, "adapter-b")
+        engine_logs_path.write_text(engine_logs)
+        adapter_a_logs_path.write_text(adapter_a_logs)
+        adapter_b_logs_path.write_text(adapter_b_logs)
+
+        winner = _find_winner_in_adapter_logs(adapter_a_logs, adapter_b_logs)
+        last_tick = _last_tick_from_engine_log(engine_logs)
+
+        if engine_exited_cleanly:
+            status = "ok"
+
     except subprocess.CalledProcessError as exc:
         _fail(f"docker compose failed: {exc}")
     finally:
@@ -116,50 +134,81 @@ def main() -> int:
             )
 
     elapsed = round(time.time() - start, 1)
+    winner_name = None
+    if winner == "a":
+        winner_name = args.name_a
+    elif winner == "b":
+        winner_name = args.name_b
+    elif winner == "draw":
+        winner_name = "draw"
+
     result = {
         "match_id": match_id,
         "status": status,
         "seed": seed,
-        "teams": {"a": {"name": args.name_a, "endpoint": args.team_a},
-                   "b": {"name": args.name_b, "endpoint": args.team_b}},
-        "winner": winner,  # "a" | "b" | "draw" | None
-        "winner_name": (args.name_a if winner == "a" else args.name_b if winner == "b" else winner),
+        "teams": {
+            "a": {"name": args.name_a, "endpoint": args.team_a},
+            "b": {"name": args.name_b, "endpoint": args.team_b},
+        },
+        "winner": winner,
+        "winner_name": winner_name,
         "last_tick": last_tick,
         "elapsed_s": elapsed,
         "artifacts": {
-            "engine_logs": str(engine_logs_path),
-            "out_dir": str(out_dir),
+            "engine_logs":   str(engine_logs_path),
+            "adapter_a_logs": str(adapter_a_logs_path),
+            "adapter_b_logs": str(adapter_b_logs_path),
+            "out_dir":       str(out_dir),
         },
     }
     print(json.dumps(result, indent=2))
     return 0
 
 
-def _parse_winner(logs: str) -> tuple[str | None, int | None]:
-    """Heuristic: scan the engine log output for a game-end signal and tick.
+def _compose_logs(env: dict, service: str) -> str:
+    rc = subprocess.run(
+        ["docker", "compose", "logs", "--no-color", service],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return rc.stdout
 
-    Bomberland logs 'Winner: a' / 'Winner: b' / 'Draw' on game end. We stay
-    permissive so slight format changes don't break us."""
-    winner = None
-    last_tick = None
-    for line in logs.splitlines():
-        lower = line.lower()
-        if "winner" in lower:
-            if "agentA" in line or "winner: a" in lower:
-                winner = "a"
-            elif "agentB" in line or "winner: b" in lower:
-                winner = "b"
-            elif "draw" in lower:
-                winner = "draw"
-        if "tick" in lower:
-            import re
-            m = re.search(r"tick[^0-9]*(\d+)", lower)
-            if m:
-                try:
-                    last_tick = max(last_tick or 0, int(m.group(1)))
-                except ValueError:
-                    pass
-    return winner, last_tick
+
+# Matches what the adapter logs on endgame:
+#   INFO [adapter-a] endgame_state received: {'winning_agent_id': 'b'}
+# Some Bomberland builds also send winning_agent_id == None (= draw / no-winner).
+_ENDGAME_RE = re.compile(
+    r"endgame_state received:.*?winning_agent_id'?\s*:\s*'?(?P<who>[abAB]|None|null)'?",
+    re.IGNORECASE,
+)
+
+
+def _find_winner_in_adapter_logs(*logs: str) -> str | None:
+    for log in logs:
+        for m in _ENDGAME_RE.finditer(log):
+            who = m.group("who").lower()
+            if who in ("a", "b"):
+                return who
+            if who in ("none", "null"):
+                return "draw"
+    return None
+
+
+_TICK_RE = re.compile(r"tick\s*#?(\d+)", re.IGNORECASE)
+
+
+def _last_tick_from_engine_log(log: str) -> int | None:
+    last = None
+    for m in _TICK_RE.finditer(log):
+        try:
+            v = int(m.group(1))
+            if last is None or v > last:
+                last = v
+        except ValueError:
+            pass
+    return last
 
 
 def _fail(msg: str) -> None:
