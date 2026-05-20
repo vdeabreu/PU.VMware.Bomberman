@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Fetch the Bomberland engine into engine/bomberland/.
-# - If this workspace is itself a git repo, add Bomberland as a submodule.
-# - Otherwise, plain `git clone`. Either way you end up with engine/bomberland/
-#   pinned to the chosen ref.
-# Idempotent: running twice is a no-op.
+# - If this workspace is a git repo, track Bomberland as a submodule.
+# - Otherwise, plain `git clone`.
+# Idempotent: safe to run multiple times.
+#
+# Note: the offsite stack uses the prebuilt Docker image
+# (gocoderone/bomberland-engine:2477). This script is only needed if you want
+# the engine source locally (schema, examples, custom builds).
 
 set -euo pipefail
 
@@ -21,17 +24,44 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     is_git_repo=1
 fi
 
-# Already fetched?
-if [ -d "${SUBMODULE_PATH}/.git" ] || [ -f "${SUBMODULE_PATH}/.git" ]; then
-    echo "[engine] Engine already present at ${SUBMODULE_PATH}, updating"
-    if [ "${is_git_repo}" = "1" ] && [ -f .gitmodules ] && grep -q "${SUBMODULE_PATH}" .gitmodules; then
-        git submodule update --init --recursive "${SUBMODULE_PATH}"
+engine_present_on_disk() {
+    [ -d "${SUBMODULE_PATH}/.git" ] || [ -f "${SUBMODULE_PATH}/.git" ]
+}
+
+submodule_registered() {
+    if [ -f .gitmodules ] && grep -q "path = ${SUBMODULE_PATH}" .gitmodules 2>/dev/null; then
+        return 0
     fi
-else
-    if [ -d "${SUBMODULE_PATH}" ] && [ -z "$(ls -A "${SUBMODULE_PATH}")" ]; then
+    # Gitlink in the index (mode 160000) — submodule staged even if .gitmodules is missing.
+    if [ "${is_git_repo}" = "1" ] && git ls-files --stage "${SUBMODULE_PATH}" 2>/dev/null | grep -q '^160000'; then
+        return 0
+    fi
+    return 1
+}
+
+remove_stale_empty_dir() {
+    if [ -d "${SUBMODULE_PATH}" ] && [ -z "$(ls -A "${SUBMODULE_PATH}" 2>/dev/null || true)" ]; then
         echo "[engine] Removing stale empty directory ${SUBMODULE_PATH}"
         rmdir "${SUBMODULE_PATH}"
     fi
+}
+
+init_submodule() {
+    echo "[engine] Initializing submodule at ${SUBMODULE_PATH}"
+    remove_stale_empty_dir
+    git submodule update --init --recursive "${SUBMODULE_PATH}"
+}
+
+if engine_present_on_disk; then
+    echo "[engine] Engine already present at ${SUBMODULE_PATH}, updating"
+    if [ "${is_git_repo}" = "1" ] && submodule_registered; then
+        git submodule update --init --recursive "${SUBMODULE_PATH}"
+    fi
+elif [ "${is_git_repo}" = "1" ] && submodule_registered; then
+    # Common after a partial checkout or manual rmdir: registered in git, missing on disk.
+    init_submodule
+else
+    remove_stale_empty_dir
 
     if [ "${is_git_repo}" = "1" ]; then
         echo "[engine] Adding ${REMOTE_URL} as submodule at ${SUBMODULE_PATH}"
@@ -50,7 +80,8 @@ echo "[engine] Checked out $(git rev-parse --short HEAD) on ${PIN_REF}"
 
 echo ""
 echo "[engine] Done."
-echo "[engine] Next step: docker compose build game-engine"
+echo "[engine] The running stack uses the prebuilt image from docker-compose.yml;"
+echo "[engine] you do not need to build the engine unless you changed the source."
 if [ "${is_git_repo}" = "0" ]; then
     echo ""
     echo "[engine] Tip: run 'git init' in ${REPO_ROOT} if you want Bomberland"
